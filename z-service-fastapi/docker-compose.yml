@@ -1,0 +1,19 @@
+version: "3.8"
+
+services:
+  z-service-fastapi:
+    image: z-service-fastapi:latest
+    build: .
+    container_name: z-service-fastapi
+    restart: always
+    environment:
+      COMFY_URL: ${COMFY_URL}
+      COMFY_API_KEY: ${COMFY_API_KEY}
+    ports:
+      - "8000:8000"
+    networks:
+      - z-service-network
+
+networks:
+  z-service-network:
+    external: true

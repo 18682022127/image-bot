@@ -1,0 +1,25 @@
+version: "3.8"
+
+services:
+  z-service-n8n:
+    image: docker.n8n.io/n8nio/n8n
+    container_name: z-service-n8n
+    restart: always
+    ports:
+      - "5678:5678"
+    environment:
+      N8N_PROTOCOL: https
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE}
+      WEBHOOK_URL: ${WEBHOOK_URL}
+      N8N_PROXY_HOPS: 1
+      HTTP_PROXY: http://host.docker.internal:7890
+      HTTPS_PROXY: http://host.docker.internal:7890
+      NO_PROXY: localhost,127.0.0.1,z-service-fastapi,z-service-ngrok
+    volumes:
+      - ./n8n_data:/home/node/.n8n
+    networks:
+      - z-service-network
+
+networks:
+  z-service-network:
+    external: true

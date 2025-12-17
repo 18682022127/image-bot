@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  # 这是一个“守网人”容器
+  # 它的作用仅仅是挂起一个极小的 Alpine 镜像，占用几乎为 0 的资源
+  # 只要它在运行，z-network 就会一直存在
+  z-service-network:
+    image: alpine:latest
+    container_name: z-service-network
+    restart: always
+    # 让容器保持运行状态的命令
+    command: tail -f /dev/null
+    networks:
+      - z-service-network
+
+networks:
+  z-service-network:
+    # [关键] 显式指定网络名称
+    # 如果不写这个 name，docker 会默认创建名为 z-service-network_z-network 的网络
+    # 写了 name，网络名就是固定的 "z-network"，方便其他服务引用
+    name: z-service-network
+    driver: bridge
