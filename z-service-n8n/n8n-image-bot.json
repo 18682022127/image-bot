@@ -1,0 +1,370 @@
+{
+  "name": "Group Bot Master V4 (Strict)",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "id": "a2c9766e-904d-4362-8d5f-f604e997af42",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -832,
+        256
+      ],
+      "webhookId": "group-master-v4",
+      "credentials": {
+        "telegramApi": {
+          "id": "KwAzFRET7KeFoHlA",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// 初始化变量\nconst msg = $('Telegram Trigger').item.json.message;\nconst chatType = msg.chat.type; // 'private', 'group', 'supergroup'\nlet prompt = \"\";\nlet imageFileId = null;\nlet actionType = \"ignore\"; // 'txt2img', 'img2img', 'error_missing_prompt', 'ignore'\n\n// ⚠️ 请修改这里：你的机器人用户名 (不带@)\nconst BOT_USERNAME = \"z_mindjourey_bot\"; \n\n// --- 逻辑判断核心 ---\n\n// 1. 获取文本内容 (可能是 text 或者是 caption)\nlet fullText = msg.text || msg.caption || \"\";\n\n// 2. 判断是否被 @ (群组中必须被 @ 或者是回复机器人，或者是私聊)\nconst isPrivate = chatType === 'private';\nconst hasMention = fullText.includes('@' + BOT_USERNAME);\nconst isReplyToBot = msg.reply_to_message && msg.reply_to_message.from.username === BOT_USERNAME;\n\n// 如果是群组，且没有 @ 也没有回复机器人，直接忽略\nif (!isPrivate && !hasMention && !isReplyToBot) {\n  return { json: { actionType: \"ignore\" } };\n}\n\n// 3. 清理关键词，提取 Prompt\n// 移除 @username 和 \"画图：\" 等前缀\nprompt = fullText.replace('@' + BOT_USERNAME, '')\n                 .replace('画图：', '')\n                 .replace('画图:', '')\n                 .trim();\n\n// 4. 判断任务类型\n\n// 情况 A: 消息本身就是一张图 (私聊直接发图，或群里发图带caption)\nif (msg.photo) {\n  actionType = \"img2img\";\n  imageFileId = msg.photo[msg.photo.length - 1].file_id;\n}\n\n// 情况 B: 消息是文字，但是【回复】了一张图 (群里回复图片)\nelse if (msg.reply_to_message && msg.reply_to_message.photo) {\n  actionType = \"img2img\";\n  const replyPhotos = msg.reply_to_message.photo;\n  imageFileId = replyPhotos[replyPhotos.length - 1].file_id;\n}\n\n// 情况 C: 只有文字 (文生图)\nelse if (prompt.length > 0) {\n  actionType = \"txt2img\";\n}\n\n// 5. 【关键修改】强制校验图生图的提示词\nif (actionType === 'img2img' && prompt.length === 0) {\n  actionType = 'error_missing_prompt';\n}\n\nreturn {\n  json: {\n    actionType,\n    prompt,\n    imageFileId,\n    chatId: msg.chat.id,\n    messageId: msg.message_id\n  }\n};\n"
+      },
+      "id": "932a55ec-a5a7-4948-8c06-c2c38e09ff7c",
+      "name": "智能逻辑解析",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -608,
+        256
+      ]
+    },
+    {
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{ $json.actionType }}",
+        "rules": {
+          "rules": [
+            {
+              "value2": "txt2img"
+            },
+            {
+              "value2": "img2img",
+              "output": 1
+            },
+            {
+              "value2": "error_missing_prompt",
+              "output": 2
+            }
+          ]
+        },
+        "fallbackOutput": 3
+      },
+      "id": "26620eaa-cb59-4467-8c83-99b6f2acdbb8",
+      "name": "任务路由",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [
+        -384,
+        256
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://z-service-fastapi:8000/v1/images/generations",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer sk-comfyui-z-image-turbo"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "prompt",
+              "value": "={{ $json.prompt }}"
+            },
+            {
+              "name": "n",
+              "value": "1"
+            },
+            {
+              "name": "size",
+              "value": "1024x1024"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "9cb51640-92d0-4895-a023-7ad953fc7b10",
+      "name": "调用文生图 API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -128,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "file",
+        "fileId": "={{ $json.imageFileId }}",
+        "additionalFields": {}
+      },
+      "id": "ddf98395-38b2-462b-b25a-5294a701cb89",
+      "name": "下载图片",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -144,
+        288
+      ],
+      "webhookId": "706bc30c-5ffe-408b-8b9c-6a073bc2db6a",
+      "credentials": {
+        "telegramApi": {
+          "id": "KwAzFRET7KeFoHlA",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// 传递数据给 HTTP Request\nconst jsonInput = $('智能逻辑解析').first().json;\nconst binaryData = items[0].binary.data;\n\nreturn {\n  json: {\n    prompt: jsonInput.prompt,\n    strength: 0.6,\n    n: 1\n  },\n  binary: {\n    data: binaryData\n  }\n};"
+      },
+      "id": "9e82fc07-c5ba-4669-85b2-ce45aed754a2",
+      "name": "准备图生图数据",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        64,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://z-service-fastapi:8000/v1/images/img2img",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer sk-comfyui-z-image-turbo"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "prompt",
+              "value": "={{ $json.prompt }}"
+            },
+            {
+              "name": "strength",
+              "value": "0.6"
+            },
+            {
+              "parameterType": "formBinaryData",
+              "name": "image",
+              "inputDataFieldName": "data"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "f56ab4d5-5ed5-4ddb-837a-73992879088c",
+      "name": "调用图生图 API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        256,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const b64 = items[0].json.data[0].b64_json;\nconst origin = $('智能逻辑解析').first().json;\n\nreturn [{\n  json: {\n    chat_id: origin.chatId,\n    message_id: origin.messageId,\n    caption: \"🎨 绘制完成!\"\n  },\n  binary: {\n    image: {\n      data: b64,\n      mimeType: 'image/png',\n      fileName: 'result.png'\n    }\n  }\n}];"
+      },
+      "id": "944b4a16-540d-4cbb-a9c3-ba597002bf8b",
+      "name": "处理返回结果",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        512,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendPhoto",
+        "chatId": "={{ $json.chat_id }}",
+        "binaryData": true,
+        "binaryPropertyName": "image",
+        "additionalFields": {
+          "caption": "={{ $json.caption }}",
+          "reply_to_message_id": "={{ $json.message_id }}"
+        }
+      },
+      "id": "690e7171-cf83-4d30-b68e-91b25fe6f0c4",
+      "name": "发送图片",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        736,
+        208
+      ],
+      "webhookId": "1ff2be3b-56cc-4d2f-aae1-b8fcc9584454",
+      "credentials": {
+        "telegramApi": {
+          "id": "KwAzFRET7KeFoHlA",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "⚠️ **操作提示**\n\n图生图必须提供说明\n\n🔹 **私聊**：请在发送图片时，在“添加说明”处输入提示词。\n🔹 **群聊**：请回复图片并添加消息文本",
+        "additionalFields": {
+          "appendAttribution": false,
+          "reply_to_message_id": "={{ $json.messageId }}"
+        }
+      },
+      "id": "10c4311a-4608-4088-947f-726ce19fb533",
+      "name": "发送错误提示",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -144,
+        512
+      ],
+      "webhookId": "2a9cddbb-5aa8-4aa6-a2d3-843d4c49dbe4",
+      "credentials": {
+        "telegramApi": {
+          "id": "KwAzFRET7KeFoHlA",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "智能逻辑解析",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "智能逻辑解析": {
+      "main": [
+        [
+          {
+            "node": "任务路由",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "任务路由": {
+      "main": [
+        [
+          {
+            "node": "调用文生图 API",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "下载图片",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "发送错误提示",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "调用文生图 API": {
+      "main": [
+        [
+          {
+            "node": "处理返回结果",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "下载图片": {
+      "main": [
+        [
+          {
+            "node": "准备图生图数据",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "准备图生图数据": {
+      "main": [
+        [
+          {
+            "node": "调用图生图 API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "调用图生图 API": {
+      "main": [
+        [
+          {
+            "node": "处理返回结果",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "处理返回结果": {
+      "main": [
+        [
+          {
+            "node": "发送图片",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "3004cd45-f88a-4b62-88b4-81bcd02411ab",
+  "meta": {
+    "instanceId": "ddaf392637b206c3ca35cb59af8832c68e4fb30d5aa89f58f86f6c1d64e88ff6"
+  },
+  "id": "51qLWr3p7J6jUmRt",
+  "tags": []
+}
