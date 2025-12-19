@@ -14,7 +14,7 @@ services:
       N8N_PROXY_HOPS: 1
       HTTP_PROXY: http://host.docker.internal:7890
       HTTPS_PROXY: http://host.docker.internal:7890
-      NO_PROXY: localhost,127.0.0.1,z-service-fastapi,z-service-ngrok
+      NO_PROXY: localhost,127.0.0.1,z-service-fastapi,z-service-ngrok,10.126.3.102
     volumes:
       - ./n8n_data:/home/node/.n8n
     networks:

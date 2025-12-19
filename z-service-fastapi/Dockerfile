@@ -10,6 +10,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 # 复制你的代码
 COPY main.py .
+COPY workflow_txt2img.json .
+COPY workflow_img2img.json .
 
 # 暴露端口
 EXPOSE 8000

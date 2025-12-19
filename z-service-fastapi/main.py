@@ -10,6 +10,7 @@ import time
 import base64
 import asyncio
 import aiohttp
+import logging # 引入日志模块
 import io
 from pathlib import Path
 from datetime import datetime
@@ -19,6 +20,9 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi import Request
 
 # ==================== CONFIG ====================
 COMFYUI_HOST = os.getenv("COMFYUI_HOST", "10.126.3.166")
@@ -87,18 +91,34 @@ class WorkflowManager:
             print(f"[ERROR] img2img JSON error: {e}")
 
     def find_prompt_node(self, workflow: dict) -> Optional[str]:
+        """
+        [关键修改] 更精准地查找正向提示词节点
+        优先查找标题包含 'positive' 的节点，避免误匹配到 'Negative Prompt'
+        """
+        # 1. 优先：检查标题中是否明确包含 "positive" 或 "正向"
         for node_id, node in workflow.items():
             if node.get("class_type") == "CLIPTextEncode":
                 meta = node.get("_meta", {})
                 title = meta.get("title", "").lower()
-                if any(kw in title for kw in ["正向", "positive", "prompt"]):
+                # 排除 negative，确保只找 positive
+                if "negative" not in title and any(kw in title for kw in ["正向", "positive"]):
                     return node_id
 
+        # 2. 备选：通过 KSampler 的连接关系反向查找 (最稳妥的方式)
         for node_id, node in workflow.items():
             if "KSampler" in node.get("class_type", ""):
                 positive_input = node.get("inputs", {}).get("positive", [])
                 if isinstance(positive_input, list) and len(positive_input) >= 1:
                     return str(positive_input[0])
+
+        # 3. 保底：只找标题包含 prompt 的 (风险较高，放在最后)
+        for node_id, node in workflow.items():
+            if node.get("class_type") == "CLIPTextEncode":
+                meta = node.get("_meta", {})
+                title = meta.get("title", "").lower()
+                if "prompt" in title and "negative" not in title:
+                    return node_id
+
         return None
 
     def find_sampler_node(self, workflow: dict) -> Optional[str]:
@@ -148,20 +168,32 @@ class WorkflowManager:
 
         workflow = json.loads(json.dumps(self.img2img_template))
 
+        # 1. Update Prompt (Text)
         prompt_node = self.find_prompt_node(workflow)
         if prompt_node and prompt_node in workflow:
+            # 你的工作流中节点 6 是正向提示词
             workflow[prompt_node]["inputs"]["text"] = prompt
+        else:
+            print("[WARN] Could not find positive prompt node in img2img workflow")
 
+        # 2. Update Image Source (Filename)
         load_image_node = self.find_load_image_node(workflow)
         if load_image_node and load_image_node in workflow:
+            # 你的工作流中节点 19 是 LoadImage
             workflow[load_image_node]["inputs"]["image"] = image_name
+        else:
+            print("[WARN] Could not find LoadImage node in img2img workflow")
 
+        # 3. Update Denoise Strength & Seed
         sampler_node = self.find_sampler_node(workflow)
         if sampler_node and sampler_node in workflow:
+            # 你的工作流中节点 3 是 KSampler
             workflow[sampler_node]["inputs"]["denoise"] = strength
             if seed is None:
                 seed = int(time.time() * 1000) % (2**32)
             workflow[sampler_node]["inputs"]["seed"] = seed
+        else:
+            print("[WARN] Could not find KSampler node in img2img workflow")
 
         return workflow
 
@@ -173,17 +205,22 @@ class ComfyUIClient:
 
     async def upload_image(self, image_data: bytes, filename: str) -> str:
         form_data = aiohttp.FormData()
+        # 'image' is the field name ComfyUI expects
         form_data.add_field('image', image_data, filename=filename, content_type='image/png')
         form_data.add_field('overwrite', 'true')
 
         async with aiohttp.ClientSession() as session:
-            async with session.post(f"{self.base_url}/upload/image", data=form_data) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    raise HTTPException(status_code=500, detail=f"Upload failed: {error_text}")
+            try:
+                async with session.post(f"{self.base_url}/upload/image", data=form_data) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        raise HTTPException(status_code=500, detail=f"Upload failed: {error_text}")
 
-                result = await response.json()
-                return result.get("name", filename)
+                    result = await response.json()
+                    # Returns the filename saved on server
+                    return result.get("name", filename)
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to connect to ComfyUI upload: {e}")
 
     async def queue_prompt(self, workflow: dict) -> str:
         payload = {
@@ -192,24 +229,30 @@ class ComfyUIClient:
         }
 
         async with aiohttp.ClientSession() as session:
-            async with session.post(f"{self.base_url}/prompt", json=payload) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    raise HTTPException(status_code=500, detail=f"ComfyUI error: {error_text}")
+            try:
+                async with session.post(f"{self.base_url}/prompt", json=payload) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        raise HTTPException(status_code=500, detail=f"ComfyUI error: {error_text}")
 
-                result = await response.json()
-                return result.get("prompt_id")
+                    result = await response.json()
+                    return result.get("prompt_id")
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to queue prompt: {e}")
 
     async def wait_for_completion(self, prompt_id: str, timeout: int = 300) -> dict:
         start_time = time.time()
 
         async with aiohttp.ClientSession() as session:
             while time.time() - start_time < timeout:
-                async with session.get(f"{self.base_url}/history/{prompt_id}") as response:
-                    if response.status == 200:
-                        history = await response.json()
-                        if prompt_id in history:
-                            return history[prompt_id]
+                try:
+                    async with session.get(f"{self.base_url}/history/{prompt_id}") as response:
+                        if response.status == 200:
+                            history = await response.json()
+                            if prompt_id in history:
+                                return history[prompt_id]
+                except Exception:
+                    pass
 
                 await asyncio.sleep(0.5)
 
@@ -223,10 +266,13 @@ class ComfyUIClient:
         }
 
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"{self.base_url}/view", params=params) as response:
-                if response.status != 200:
-                    raise HTTPException(status_code=500, detail="Failed to get image")
-                return await response.read()
+            try:
+                async with session.get(f"{self.base_url}/view", params=params) as response:
+                    if response.status != 200:
+                        raise HTTPException(status_code=500, detail="Failed to get image")
+                    return await response.read()
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to retrieve image: {e}")
 
 # ==================== FastAPI App ====================
 workflow_manager: WorkflowManager = None
@@ -239,10 +285,9 @@ async def lifespan(app: FastAPI):
     comfyui_client = ComfyUIClient(COMFYUI_URL)
     print(f"")
     print(f"========================================")
-    print(f"  ComfyUI API Bridge v2.0")
+    print(f"  ComfyUI API Bridge v2.1 (Adapted)")
     print(f"========================================")
     print(f"  ComfyUI:  {COMFYUI_URL}")
-    print(f"  API Key:  {API_KEY[:15]}...")
     print(f"  txt2img:  {WORKFLOW_TXT2IMG}")
     print(f"  img2img:  {WORKFLOW_IMG2IMG}")
     print(f"========================================")
@@ -252,7 +297,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="ComfyUI API Bridge",
     description="OpenAI compatible API with txt2img and img2img",
-    version="2.0.0",
+    version="2.1.0",
     lifespan=lifespan
 )
 
@@ -283,9 +328,38 @@ async def list_models(authorization: str = Header(None)):
         "data": [{"id": MODEL_NAME, "object": "model", "created": int(time.time()), "owned_by": "local"}]
     }
 
+@app.middleware("http")
+async def log_request(request: Request, call_next):
+    body = await request.body()
+    print("=== Incoming Request ===")
+    print("Method:", request.method)
+    print("URL:", request.url)
+    print("Headers:", dict(request.headers))
+    print("Body (raw):", body[:500])  # 防止太大
+    response = await call_next(request)
+    return response
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    body = await request.body()
+    print("❌ 校验失败")
+    print("URL:", request.url)
+    print("Headers:", dict(request.headers))
+    print("Raw body:", body)
+    print("Errors:", exc.errors())
+
+    return JSONResponse(
+        status_code=400,
+        content={
+            "message": "Validation failed",
+            "errors": exc.errors()
+        },
+    )
+
 @app.post("/v1/images/generations", response_model=ImageGenerationResponse)
 async def generate_images(request: ImageGenerationRequest, authorization: str = Header(None)):
-    """Text to image (txt2img) - OpenAI compatible"""
+    """Text to image (txt2img)"""
     verify_api_key(authorization)
 
     if workflow_manager.txt2img_template is None:
@@ -327,71 +401,25 @@ async def generate_images(request: ImageGenerationRequest, authorization: str = 
 
     return ImageGenerationResponse(created=int(time.time()), data=generated_images)
 
-@app.post("/v1/images/edits", response_model=ImageGenerationResponse)
-async def edit_images(request: Img2ImgRequest, authorization: str = Header(None)):
-    """Image to image (img2img) - OpenAI compatible"""
-    verify_api_key(authorization)
-
-    if workflow_manager.img2img_template is None:
-        raise HTTPException(status_code=500, detail="img2img workflow not configured")
-
-    try:
-        image_data = base64.b64decode(request.image)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid base64 image: {e}")
-
-    generated_images = []
-
-    for i in range(request.n):
-        filename = f"input_{int(time.time())}_{i}.png"
-        uploaded_name = await comfyui_client.upload_image(image_data, filename)
-        print(f"[img2img] Uploaded: {uploaded_name}")
-
-        seed = int(time.time() * 1000 + i) % (2**32)
-        workflow = workflow_manager.prepare_img2img(
-            prompt=request.prompt, image_name=uploaded_name, strength=request.strength, seed=seed
-        )
-
-        prompt_id = await comfyui_client.queue_prompt(workflow)
-        print(f"[img2img] Task: {prompt_id}")
-
-        result = await comfyui_client.wait_for_completion(prompt_id)
-
-        outputs = result.get("outputs", {})
-        for node_id, node_output in outputs.items():
-            if "images" in node_output:
-                for img_info in node_output["images"]:
-                    result_image = await comfyui_client.get_image(
-                        filename=img_info["filename"],
-                        subfolder=img_info.get("subfolder", ""),
-                        folder_type=img_info.get("type", "output")
-                    )
-                    b64_data = base64.b64encode(result_image).decode("utf-8")
-                    generated_images.append(ImageData(b64_json=b64_data, revised_prompt=request.prompt))
-                    break
-            if len(generated_images) > i:
-                break
-
-    if not generated_images:
-        raise HTTPException(status_code=500, detail="Failed to generate image")
-
-    return ImageGenerationResponse(created=int(time.time()), data=generated_images)
-
 @app.post("/v1/images/img2img", response_model=ImageGenerationResponse)
 async def img2img_form(
         prompt: str = Form(...),
         image: UploadFile = File(...),
         strength: float = Form(0.6),
-        size: str = Form("1024x1024"),
         n: int = Form(1),
         authorization: str = Header(None)
 ):
-    """Image to image with form upload"""
+    """Image to image (img2img) - Form Data endpoint"""
+    print(str)
+    print(image)
+    print(strength)
+    print(n)
     verify_api_key(authorization)
 
     if workflow_manager.img2img_template is None:
         raise HTTPException(status_code=500, detail="img2img workflow not configured")
 
+    # Read uploaded file
     image_data = await image.read()
     generated_images = []
 
@@ -446,16 +474,6 @@ async def health_check():
         "img2img": workflow_manager.img2img_template is not None
     }
 
-@app.post("/reload")
-async def reload_workflows(authorization: str = Header(None)):
-    verify_api_key(authorization)
-    workflow_manager.load_workflows()
-    return {
-        "status": "ok",
-        "txt2img": workflow_manager.txt2img_template is not None,
-        "img2img": workflow_manager.img2img_template is not None
-    }
-
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="10.126.3.102", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8001)
