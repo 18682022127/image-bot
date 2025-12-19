@@ -1,0 +1,351 @@
+{
+  "name": "Img2Img-Production-V2",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "id": "bcdedd02-3c79-4408-a0be-51606c153db6",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -880,
+        416
+      ],
+      "webhookId": "img2img-production-webhook",
+      "credentials": {
+        "telegramApi": {
+          "id": "KwAzFRET7KeFoHlA",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "check-photo-bool",
+              "leftValue": "={{ !!$json.message.photo }}",
+              "rightValue": "={{ true }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "32149e0b-95a3-454b-b011-b00ac49311d8",
+      "name": "Is Photo?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -656,
+        416
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 1. 提取 FastAPI 返回的 Base64\nconst b64 = items[0].json.data[0].b64_json;\n\n// 2. 转回二进制流\nconst binaryData = Buffer.from(b64, 'base64');\n\n// 3. 获取原始消息 ID (用于回复)\nconst triggerMsg = $('Telegram Trigger').first().json.message;\n\nreturn [{\n  json: {\n    chat_id: triggerMsg.chat.id,\n    message_id: triggerMsg.message_id,\n    caption: \"🎨 图生图重绘完成!\"\n  },\n  binary: {\n    image: {\n      data: b64,\n      mimeType: 'image/png',\n      fileName: 'generated_result.png'\n    }\n  }\n}];"
+      },
+      "id": "8dc5e3d7-7541-41eb-b4e9-f2fb01c88a3e",
+      "name": "Process Base64",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        368,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendPhoto",
+        "chatId": "={{ $json.chat_id }}",
+        "binaryData": true,
+        "binaryPropertyName": "image",
+        "additionalFields": {
+          "caption": "={{ $json.caption }}",
+          "reply_to_message_id": "={{ $json.message_id }}"
+        }
+      },
+      "id": "45860e1b-f2f2-4a1f-ab18-c2c7887bd069",
+      "name": "Send Result",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        544,
+        400
+      ],
+      "webhookId": "968114bc-8fc4-4f67-b859-67b23c5fa302",
+      "credentials": {
+        "telegramApi": {
+          "id": "KwAzFRET7KeFoHlA",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://10.126.3.102:8000/v1/images/img2img",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer sk-comfyui-z-image-turbo"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "prompt",
+              "value": "={{ $('Telegram Trigger').item.json.message.caption || \"high quality, detailed\" }}"
+            },
+            {
+              "name": "strength",
+              "value": "0.6"
+            },
+            {
+              "name": "n",
+              "value": "1"
+            },
+            {
+              "parameterType": "formBinaryData",
+              "name": "image",
+              "inputDataFieldName": "data"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "7d85c1c0-f82d-4eec-8e96-9f729ad264f3",
+      "name": "Call FastAPI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        192,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "file",
+        "fileId": "={{ $json.message.photo[$json.message.photo.length - 1].file_id }}",
+        "additionalFields": {
+          "mimeType": "image/jpeg"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -208,
+        400
+      ],
+      "id": "961a0e17-3678-4008-8b2b-51bc26851311",
+      "name": "Get a file",
+      "webhookId": "931eb25e-1588-405a-b3b9-c28f166c2de3",
+      "credentials": {
+        "telegramApi": {
+          "id": "KwAzFRET7KeFoHlA",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// 1. 获取 Trigger 里的提示词 (JSON部分)\nconst triggerNode = $('Telegram Trigger').first();\n// 获取 Caption，如果没有就用默认值\nconst caption = triggerNode.json.message.caption;\n\n// 2. 获取 Download Photo 里的“文件凭证” (Binary部分)\n// 这里的 .binary.data 就是你看到的那个包含 { mimeType:..., data: 'filesystem-v2' } 的对象\nconst binaryObject = $('Get a file').first().binary.data;\n\n// 3. 检查凭证是否存在\nif (!binaryObject) {\n  throw new Error(\"❌ 没找到文件凭证！请检查 Download Photo 节点的 'Put Output File in Field' 是否填了 'data'\");\n}\n\n// 4. 【关键步骤】直接把凭证传下去！\n// 不要读文件，不要转 Base64，直接传对象\nreturn {\n  json: {\n    prompt: caption,\n    strength: 0.6,\n    n: 1\n  },\n  binary: {\n    // 这里把凭证对象赋给 key 为 'data' 的属性\n    // 下一个 HTTP 节点会通过 'data' 这个 key 找到凭证，然后自动去硬盘读文件\n    data: binaryObject\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -16,
+        400
+      ],
+      "id": "cdf7bea3-26bd-4367-a0b7-51727ddbb8c8",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "check-caption",
+              "leftValue": "={{ $json.message.caption }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "isNotEmpty"
+              }
+            },
+            {
+              "id": "3b488cf1-8c6a-47f5-8ce5-efadee6717a2",
+              "leftValue": "={{ $json.message.caption }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "empty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a65cd1bd-2b82-4dcc-a75e-afd4994094ee",
+      "name": "Has Caption?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -416,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.message.chat.id }}",
+        "text": "⚠️ 缺少提示词\n\n请在发送图片时，在下方的“添加说明”框中输入修改指令（提示词）。",
+        "additionalFields": {
+          "appendAttribution": false,
+          "reply_to_message_id": "={{ $json.message.message_id }}"
+        }
+      },
+      "id": "42b75c91-778e-4194-95b8-888578149fef",
+      "name": "Reply Error",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -288,
+        608
+      ],
+      "webhookId": "4983ed1f-5102-43d0-9915-0d3299ffdb5e",
+      "credentials": {
+        "telegramApi": {
+          "id": "KwAzFRET7KeFoHlA",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Is Photo?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Photo?": {
+      "main": [
+        [
+          {
+            "node": "Has Caption?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Base64": {
+      "main": [
+        [
+          {
+            "node": "Send Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call FastAPI": {
+      "main": [
+        [
+          {
+            "node": "Process Base64",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get a file": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Call FastAPI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Caption?": {
+      "main": [
+        [
+          {
+            "node": "Get a file",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reply Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "a787433f-7321-4b04-8163-52d6bfc748fc",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "ddaf392637b206c3ca35cb59af8832c68e4fb30d5aa89f58f86f6c1d64e88ff6"
+  },
+  "id": "2gjK9NCNcX2WAPf8",
+  "tags": []
+}
